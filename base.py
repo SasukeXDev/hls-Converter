@@ -55,6 +55,7 @@ def m3u8():
     if not link:
         return jsonify({"error": "Missing link"}), 400
     return render_template('play.html', link=link)
+    return proxy_hanime_api(url)
 
 
 # 🔥 Browse Tags & Brands
