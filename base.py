@@ -9,11 +9,11 @@ from urllib.parse import urlparse, urljoin
 app = Flask(__name__)
 
 # ✅ Set your API key here or through environment variable
-MY_SECRET_KEY = os.environ.get("API_KEY", "your-super-secret-key")
+MY_SECRET_KEY = os.environ.get("API_KEY", " ")
 
 # ✅ Add your allowed domains here
 ALLOWED_DOMAINS = [
-    "https://affiliatetelegrambot-y6tu.onrender.com",
+    "affiliatetelegrambot-y6tu.onrender.com",
     " ",
     " "
 ]
