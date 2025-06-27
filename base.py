@@ -41,15 +41,21 @@ def check_api_key_and_domain():
     if client_key != MY_SECRET_KEY:
         return jsonify({"error": "Unauthorized - Invalid API Key"}), 401
 
-    # Check Origin or Referer
+    # If request is from browser, it has Origin or Referer
     origin = request.headers.get("Origin") or request.headers.get("Referer")
+    user_agent = request.headers.get("User-Agent", "")
+
     if origin:
         parsed = urlparse(origin)
         hostname = parsed.hostname
         if hostname not in ALLOWED_DOMAINS:
             return jsonify({"error": f"Unauthorized - Domain '{hostname}' not allowed"}), 403
     else:
-        return jsonify({"error": "Unauthorized - No Origin or Referer"}), 403
+        # If no Origin, allow only if User-Agent is Python Requests or Curl (means it's server-side)
+        if "python-requests" in user_agent or "curl" in user_agent:
+            pass  # trusted server request, key is enough
+        else:
+            return jsonify({"error": "Unauthorized - Missing Origin or Referer"}), 403
 
 
 # 🔥 Trending
