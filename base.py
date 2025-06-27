@@ -88,36 +88,6 @@ def search():
 
 
 # ▶️ /play for m3u8 & ts proxying
-@app.route("/play")
-def play_proxy():
-    target_url = request.args.get("url")
-    if not target_url:
-        return jsonify({"error": "Missing URL parameter"}), 400
-
-    try:
-        resp = requests.get(target_url, headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=10)
-        content_type = resp.headers.get("Content-Type", "")
-
-        # .m3u8 playlist rewrite
-        if "application/vnd.apple.mpegurl" in content_type or target_url.endswith(".m3u8"):
-            base_url = target_url.rsplit("/", 1)[0] + "/"
-            content = resp.text
-
-            def rewrite_line(line):
-                if line.strip().startswith("#") or not line.strip():
-                    return line
-                return "/play?url=" + urljoin(base_url, line.strip())
-
-            rewritten = "\n".join(rewrite_line(line) for line in content.splitlines())
-            return Response(rewritten, content_type=content_type)
-
-        # .ts segments or other files — stream directly
-        return Response(resp.iter_content(chunk_size=1024), content_type=content_type)
-
-    except Exception as e:
-        return jsonify({"error": f"Proxy error: {str(e)}"}), 500
-        
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
