@@ -60,7 +60,7 @@ def check_api_key_and_domain():
 
 # 🔥 Home
 @app.route("/home")
-def trending():
+def home():
     time = request.args.get("time", "month")
     page = request.args.get("page", 0)
     url = f"https://hanime.tv/api/v8/browse-trending?time={time}&page={page}&order_by=views&ordering=desc"
