@@ -15,40 +15,50 @@ def convert():
 
     data = request.get_json(silent=True)
     video_url = data.get("url")
+    if not video_url: return jsonify({"error": "No URL"}), 400
+
     stream_id = hashlib.md5(video_url.encode()).hexdigest()
     out_dir = os.path.join(HLS_DIR, stream_id)
     playlist = os.path.join(out_dir, "index.m3u8")
 
-    os.makedirs(out_dir, exist_ok=True)
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir, exist_ok=True)
 
-    # Start FFmpeg ONLY if the playlist doesn't exist
+    # If it doesn't exist, start the conversion
     if not os.path.exists(playlist):
-        headers = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n"
-        
+        # UNIVERSAL COMMAND: Works for MKV, x265, x264, MP4
         cmd = [
-            "ffmpeg", "-y", "-headers", headers,
+            "ffmpeg", "-y",
             "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
             "-i", video_url,
-            "-map", "0:v:0", "-map", "0:a", 
-            "-c:v", "copy", "-c:a", "aac", "-ac", "2",
-            "-sn", "-dn", 
-            "-f", "hls", "-hls_time", "10", "-hls_list_size", "0",
-            "-hls_playlist_type", "vod",
+            "-map", "0:v:0",           # Take only the first video track
+            "-map", "0:a:0",           # Take only the first audio track
+            "-c:v", "copy",             # Fast copy video (works if source is h264/h265)
+            "-c:a", "aac",              # Convert audio to standard AAC
+            "-ac", "2",                 # Force Stereo
+            "-sn", "-dn",               # REMOVE SUBTITLES AND DATA (Prevents crashes)
+            "-f", "hls",
+            "-hls_time", "10",
+            "-hls_list_size", "0",
+            "-hls_playlist_type", "vod", # REMOVES LIVE BADGE
             "-hls_segment_filename", os.path.join(out_dir, "seg_%05d.ts"),
             playlist
         ]
-        # Start and move on immediately
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    # RETURN IMMEDIATELY - Don't wait for the file
+    # Return the link immediately
     proto = request.headers.get("X-Forwarded-Proto", "https")
     hls_url = f"{proto}://{request.host}/static/streams/{stream_id}/index.m3u8"
-    
     return jsonify({"status": "success", "hls_link": hls_url})
 
 @app.route("/static/streams/<path:filename>")
 def serve_hls(filename):
-    return send_from_directory(HLS_DIR, filename)
+    response = send_from_directory(HLS_DIR, filename)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    # Crucial for browser to recognize it's a video stream
+    if filename.endswith(".m3u8"):
+        response.headers["Content-Type"] = "application/vnd.apple.mpegurl"
+    return response
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
