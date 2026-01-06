@@ -8,6 +8,7 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
+# Use absolute paths for Render
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 HLS_DIR = os.path.join(BASE_DIR, "static", "streams")
 os.makedirs(HLS_DIR, exist_ok=True)
@@ -25,61 +26,57 @@ def convert():
     stream_id = hashlib.md5(video_url.encode()).hexdigest()
     out_dir = os.path.join(HLS_DIR, stream_id)
     playlist = os.path.join(out_dir, "index.m3u8")
+    log_file = os.path.join(out_dir, "ffmpeg_log.txt") # For debugging
 
     os.makedirs(out_dir, exist_ok=True)
 
-    if os.path.exists(playlist):
+    # 1. Check if already exists
+    if os.path.exists(playlist) and os.path.getsize(playlist) > 0:
         proto = request.headers.get("X-Forwarded-Proto", "https")
         return jsonify({
             "status": "success",
             "hls_link": f"{proto}://{request.host}/static/streams/{stream_id}/index.m3u8"
         })
 
-    # -------- ULTIMATE CLEAN FFMPEG COMMAND --------
+    # 2. Browser-like headers (Crucial for remote links)
+    headers = (
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n"
+        "Referer: https://360hub.fun/\r\n"
+    )
+
+    # 3. Enhanced FFmpeg Command
     cmd = [
         "ffmpeg", "-y",
-        "-hide_banner", "-loglevel", "error",
-        
-        # 1. Connection settings
+        "-headers", headers,  # Mimic browser
         "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
-        
-        # 2. Input
         "-i", video_url,
-
-        # 3. Stream Selection (The Fix)
-        "-map", "0:v:0",           # Take ONLY the first video stream
-        "-map", "0:a",             # Take ALL audio streams
-        "-sn",                     # EXPLICITLY DISABLE SUBTITLES
-        "-dn",                     # EXPLICITLY DISABLE DATA/ATTACHMENTS (Fixes PNG error)
-        "-ignore_unknown",         # Skip anything FFmpeg doesn't recognize
-        
-        # 4. Encoding
-        "-c:v", "copy",            # No re-encoding video (Fast)
-        "-c:a", "aac",             # Standard audio for HLS
-        "-ac", "2",                # Stereo downmix for stability
-        
-        # 5. HLS Settings (Fixes Live Badge)
+        "-map", "0:v:0",      # 1st Video
+        "-map", "0:a",        # All Audio
+        "-c:v", "copy",       # Direct Copy (Super Fast)
+        "-c:a", "aac",        # AAC for web
+        "-ac", "2",
+        "-sn", "-dn",         # Disable subs and data (Prevents PNG crash)
         "-f", "hls",
         "-hls_time", "10",
         "-hls_list_size", "0",
-        "-hls_playlist_type", "vod", # Removes LIVE badge, adds timeline
+        "-hls_playlist_type", "vod", # Removes LIVE badge
         "-hls_flags", "independent_segments",
-        
         "-hls_segment_filename", os.path.join(out_dir, "seg_%05d.ts"),
         playlist
     ]
 
     try:
-        # Run in background
-        subprocess.Popen(cmd)
+        # Open log file to capture errors
+        with open(log_file, "w") as log:
+            subprocess.Popen(cmd, stdout=log, stderr=log)
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-    # -------- WAIT UNTIL PLAYLIST FILE EXISTS --------
-    # Check for the file periodically before responding
+    # 4. Wait for the file to be created (Max 20 seconds)
     ready = False
-    for _ in range(15): # Wait up to 15 seconds
-        if os.path.exists(playlist) and os.path.getsize(playlist) > 0:
+    for i in range(20):
+        if os.path.exists(playlist) and os.path.getsize(playlist) > 100: # Ensure it has data
             ready = True
             break
         time.sleep(1)
@@ -89,8 +86,12 @@ def convert():
         hls_url = f"{proto}://{request.host}/static/streams/{stream_id}/index.m3u8"
         return jsonify({"status": "success", "hls_link": hls_url})
     else:
-        # If it still fails, it's likely a network/source issue
-        return jsonify({"status": "error", "message": "FFmpeg failed to generate stream. Check source link."}), 500
+        # If it failed, send the last few lines of the log to help us debug
+        error_msg = "Unknown Error"
+        if os.path.exists(log_file):
+            with open(log_file, "r") as f:
+                error_msg = f.readlines()[-3:] # Last 3 lines
+        return jsonify({"status": "error", "message": "FFmpeg Failed", "details": error_msg}), 500
 
 @app.route("/static/streams/<path:filename>")
 def serve_hls(filename):
