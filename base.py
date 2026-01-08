@@ -1,143 +1,138 @@
 import os
 import subprocess
 import hashlib
-import json
 import time
-from threading import Thread
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-HLS_DIR = os.path.join(BASE_DIR, "static/streams")
-os.makedirs(HLS_DIR, exist_ok=True)
+HLS_OUTPUT_DIR = os.path.join(BASE_DIR, "static", "streams")
+os.makedirs(HLS_OUTPUT_DIR, exist_ok=True)
 
-# Map ffprobe language codes to readable names
-LANG_MAP = {
-    "eng": "English",
-    "hin": "Hindi",
-    "por": "Portuguese",
-    "spa": "Spanish",
-    "fre": "French",
-    "jpn": "Japanese",
-    "kor": "Korean",
-}
-
-def get_audio_streams(url):
-    """Return list of (index, language name) ignoring subtitles/attachments"""
-    try:
-        cmd = [
-            "ffprobe", "-v", "error",
-            "-select_streams", "a",
-            "-show_entries", "stream=index:stream_tags=language",
-            "-of", "json",
-            url
-        ]
-        data = subprocess.check_output(cmd).decode()
-        streams = json.loads(data).get("streams", [])
-        result = []
-        for i, s in enumerate(streams):
-            lang = s.get("tags", {}).get("language", f"Audio {i+1}")
-            lang_name = LANG_MAP.get(lang.lower(), lang.upper())
-            result.append((s["index"], lang_name))
-        return result
-    except Exception as e:
-        print("FFprobe error:", e)
-        return []
-
-def hls_worker(video_url, out_dir):
-    """Background conversion to HLS"""
-    master = os.path.join(out_dir, "master.m3u8")
-    os.makedirs(out_dir, exist_ok=True)
-
-    # 1️⃣ Video track (convert to H264 8-bit for browser)
-    video_cmd = [
-        "ffmpeg", "-y", "-i", video_url,
-        "-map", "0:v:0",
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-profile:v", "main",
-        "-pix_fmt", "yuv420p",
-        "-an",
-        "-f", "hls",
-        "-hls_time", "6",
-        "-hls_list_size", "0",
-        "-hls_flags", "independent_segments",
-        "-hls_segment_filename", f"{out_dir}/v_%05d.ts",
-        f"{out_dir}/video.m3u8"
-    ]
-    subprocess.run(video_cmd, check=True)
-
-    # 2️⃣ Audio tracks
-    audio_streams = get_audio_streams(video_url)
-    audio_playlists = []
-
-    for i, (idx, lang) in enumerate(audio_streams):
-        plist = f"audio_{i}.m3u8"
-        audio_playlists.append((plist, lang))
-        audio_cmd = [
-            "ffmpeg", "-y", "-i", video_url,
-            "-map", f"0:{idx}",
-            "-c:a", "aac",
-            "-ac", "2",
-            "-vn",
-            "-f", "hls",
-            "-hls_time", "6",
-            "-hls_list_size", "0",
-            "-hls_segment_filename", f"{out_dir}/a{i}_%05d.ts",
-            f"{out_dir}/{plist}"
-        ]
-        subprocess.run(audio_cmd, check=True)
-
-    # 3️⃣ Master playlist
-    with open(master, "w") as m:
-        m.write("#EXTM3U\n#EXT-X-VERSION:3\n\n")
-        for i, (plist, lang) in enumerate(audio_playlists):
-            m.write(
-                f'#EXT-X-MEDIA:TYPE=AUDIO,'
-                f'GROUP-ID="audio",'
-                f'NAME="{lang}",'
-                f'DEFAULT={"YES" if i==0 else "NO"},'
-                f'AUTOSELECT=YES,'
-                f'URI="{plist}"\n'
-            )
-        m.write(
-            '\n#EXT-X-STREAM-INF:BANDWIDTH=6000000,CODECS="avc1.4d401f,mp4a.40.2",AUDIO="audio"\n'
-            'video.m3u8\n'
-        )
-
-@app.route("/convert", methods=["POST"])
+@app.route('/convert', methods=['POST', 'OPTIONS'])
 def convert():
-    data = request.get_json(silent=True)
-    video_url = data.get("url")
+    if request.method == 'OPTIONS':
+        return jsonify({"status": "ok"}), 200
+
+    data = request.get_json()
+    video_url = data.get('url')
     if not video_url:
-        return jsonify({"error": "Missing URL"}), 400
+        return jsonify({"status": "error", "message": "Missing URL"}), 400
 
     stream_id = hashlib.md5(video_url.encode()).hexdigest()
-    out_dir = os.path.join(HLS_DIR, stream_id)
-    master = os.path.join(out_dir, "master.m3u8")
-    os.makedirs(out_dir, exist_ok=True)
+    output_path = os.path.join(HLS_OUTPUT_DIR, stream_id)
+    master_playlist = os.path.join(output_path, "master.m3u8")
 
-    if not os.path.exists(master):
-        Thread(target=hls_worker, args=(video_url, out_dir), daemon=True).start()
+    os.makedirs(output_path, exist_ok=True)
+    base_server_url = request.host_url.rstrip('/')
 
-    return jsonify({
-        "status": "success",
-        "hls_link": f"{request.host_url}static/streams/{stream_id}/master.m3u8"
-    })
+    if not os.path.exists(master_playlist):
 
-@app.route("/static/streams/<stream_id>/<path:filename>")
-def serve(stream_id, filename):
-    directory = os.path.join(HLS_DIR, stream_id)
-    resp = send_from_directory(directory, filename)
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    if filename.endswith(".m3u8"):
-        resp.headers["Content-Type"] = "application/vnd.apple.mpegurl"
-    elif filename.endswith(".ts"):
-        resp.headers["Content-Type"] = "video/MP2T"
-    return resp
+        # 1️⃣ VIDEO ONLY HLS
+        subprocess.Popen([
+            "ffmpeg", "-y",
+            "-i", video_url,
+            "-map", "0:v:0",
+            "-c:v", "copy",
+            "-an",
+            "-f", "hls",
+            "-hls_time", "10",
+            "-hls_list_size", "0",
+            "-hls_playlist_type", "vod"
+            "-hls_segment_filename", f"{output_path}/v_%03d.ts",
+            f"{output_path}/video.m3u8"
+        ])
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+        # 2️⃣ EXTRACT ALL AUDIO TRACKS
+        probe = subprocess.check_output([
+            "ffprobe", "-v", "error",
+            "-select_streams", "a",
+            "-show_entries", "stream=index",
+            "-of", "csv=p=0",
+            video_url
+        ]).decode().strip().splitlines()
+
+        audio_playlists = []
+
+        for i, stream_index in enumerate(probe):
+            audio_playlist = f"audio_{i}.m3u8"
+            audio_playlists.append(audio_playlist)
+
+            subprocess.Popen([
+                "ffmpeg", "-y",
+                "-i", video_url,
+                "-map", f"0:{stream_index}",
+                "-c:a", "aac",
+                "-vn",
+                "-f", "hls",
+                "-hls_time", "10",
+                "-hls_list_size", "0",
+                "-hls_segment_filename", f"{output_path}/a{i}_%03d.ts",
+                f"{output_path}/{audio_playlist}"
+            ])
+
+
+
+        # Extract language names
+        audio_languages = []
+        for stream in info.get("streams", []):
+            lang = stream.get("tags", {}).get("language", "").lower()
+            if lang.startswith("en"):
+                audio_languages.append("English")
+            elif lang.startswith("hi"):
+                audio_languages.append("Hindi")
+            else:
+                audio_languages.append("Audio")  # fallback
+
+
+
+        
+
+        # 3️⃣ MASTER PLAYLIST
+
+        with open(master_playlist, "w") as m3u8:
+            m3u8.write("#EXTM3U\n")
+            m3u8.write("#EXT-X-VERSION:3\n\n")
+
+            for i, (a, lang_name) in enumerate(zip(audio_playlists, audio_languages)):
+                m3u8.write(
+                    f'#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="{lang_name}",'
+                    f'DEFAULT={"YES" if i == 0 else "NO"},AUTOSELECT=YES,URI="{a}"\n'
+                )
+
+            m3u8.write(
+                '\n#EXT-X-STREAM-INF:BANDWIDTH=8000000,'
+                'CODECS="avc1.640028,mp4a.40.2",AUDIO="audio"\n'
+                'video.m3u8\n'
+            )
+
+
+        # wait for file creation
+        for _ in range(5):
+            if os.path.exists(master_playlist):
+                break
+            time.sleep(1)
+
+    if os.path.exists(master_playlist):
+        return jsonify({
+            "status": "success",
+            "hls_link": f"{base_server_url}/static/streams/{stream_id}/master.m3u8"
+        })
+
+    return jsonify({"status": "error", "message": "Stream failed"}), 500
+
+
+@app.route('/static/streams/<path:filename>')
+def custom_static(filename):
+    response = send_from_directory(HLS_OUTPUT_DIR, filename)
+    response.headers.add("Access-Control-Allow-Origin", "*")
+    response.headers.add("Content-Type", "application/vnd.apple.mpegurl")
+    return response
+
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
